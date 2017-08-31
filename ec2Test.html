@@ -1,0 +1,2141 @@
+<!DOCTYPE html>
+<html>
+<meta charset="utf-8">
+<head>
+<script type="text/javascript" language="javascript" src="js/d3/d3.js"></script>
+<script language="Javascript" src="js/jutzPath.js" type="text/javascript"></script>
+
+<style>
+
+.node {
+  cursor: pointer;
+}
+
+.nodes circle {
+  fill: #fff;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+
+.node text {
+  font: 10px sans-serif;
+}
+
+.link {
+  fill: none;
+  stroke: #ccc;
+  stroke-width: 1.5px;
+}
+
+.leaf circle{
+	fill: #fff;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.branch circle{
+	fill: lightsteelblue;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.data-link circle{
+	fill: #green;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.jp {
+	margin-left: 100px;
+	width: 50em;
+}
+
+</style>
+
+</head>
+<body>
+<select id="selectDescribe" onchange="newQuery()">
+	<option value="ec2Regions">Regions</option>
+	<option value="ec2Instances" selected="true">Instances</option>
+	<option value="ec2Tags">Tags</option>
+	<option value="ec2Vpcs">VPCs</option>
+	<option value="ec2Accts">Account</option>
+	<option value="ec2Subnets">Subnets</option>	
+	<option value="ec2SubnetsFiltered">Filtered Subnets</option>	
+	<option value="ec2InstancesFiltered">Filtered instances</option>	
+	<option value="ec2TagsFiltered">Filtered tags</option>
+	<option value="randomTestData">random test data</option>
+</select>
+
+<input type="text" id="jutzPath" class="jp" value="Reservations/*/Instances/*/PublicIpAddress@""></input>
+<input type="button" id="btnJutzPath"  value="evaluate" onclick="evaluateJutzPath()"></input>
+
+<script>
+/*
+Using the UI
+
+- Drop down list changes data set
+- Any data set with the word "filtered" in it applies a template (filter) to the relevant data set.
+- left click on blue circle to toggle expansion (expands to whatever was already opened)
+- right click on blue circle to toggle expansion of all children (collapse sets all child nodes to 'collapsed' state so left click would only open one level after that.
+- right click on text to expand all leaf nodes  that descend from the selected node by one level.
+- dbl click on text to make that node the root node in the display.  If the node dbl clicked on has been designated a link node (it will be an id and have a dark filled circle), the referenced node is displayed as root.
+- Doing this (dbl-click) places the current tree onto a history stack)  dbl-click on the new root to go back to the previous data tree
+
+to link a field to external data
+	The function 'traverse' re-shapes json data for display in a d3 tree (more on that below).
+	If an attribute node (string, number) is being created it checks if the name of the attribute is known to be  a link field (looks in link_fields dictionary)
+	If it is it adds a link object to the current data element
+		displayObj["link"] = {link_data: link.link_data, path: p}; (where link is the link_fields dictionary and path is the full path, including id, to the linked to data)
+	
+	zoomData (called on the dbl click) checks to see if the clicked on data node has a link element (may want to change this name as it could occur 'naturally')
+	If it does, it gets the path, compiles and executes it and uses the found data as the new root.
+	
+	For an example of this, select subnets data set and expand.  Dark circles denote link fields.
+	
+	The link_fields dictionary looks like this:
+		link_fields["VpcId"] = {link_data: "ec2Vpcs", path: "Vpcs/*[VpcId@ = '$']"};
+	
+	with explanation..
+		link_fields["Name_of_field_in_source_data"] = {link_data: "name_of_data_stored_in_variable_ec2_query_dict", path: "path_from_root_of_data_to_linked_data_with_placeholder$"};
+ 
+	
+Empty data	
+	The data set may contain empty arrays and attributes with no value which can clutter the display.  Use the following variables to omit/keep.
+	
+	showEmptyAttributes = true|false;
+	showEmptyArrays = true|false;
+	
+	One advantage of keeping showEmptyAttributes = true is that array lengths are automatically displayed at the bottom of a list - probably because I am not checking for hasOwnProperty.  I have left this behaviour in.
+	
+	
+	Evaluate text box.  
+	
+	Clicking evaluate button will evaluate jutPath on the selected data set (from the root node).  It does not execute against filtered data sets, not because it can't, but because filtered data has a 
+		different data structure to the original, which might be confusing.
+	*/
+	//Examples for Instance data
+		// Reservations/*/Instances/*/PublicDnsName@
+		// Reservations/*/Instances/*/LaunchTime@
+		// Reservations/*/Instances/*/PublicIpAddress@
+		// Reservations/*/Instances/*/InstanceType@
+		// Reservations/*/Instances/*/Tags/*[Key@ = 'Name']/Value@
+		// //Instances/*/Tags/*[Key@ = 'Name']/Value@
+		// //Instances/*/Tags/*/Key@[. = 'Name']	--not sure why you would do this, but you can.  Equivalent to //Instances/*/Tags/*/[Key@ = 'Name']/@Key
+		// //Instances/*/Tags/*[Key@ = Name@]	--this won't return anything but illustrates that both operands can be attributes.
+		// //Tags/*[Key@ = 'Name']/Value@		
+		// #/Tags/*[Key@ = 'Name']/Value@
+		// Reservations/*[Instances/*/State/Name@ = 'terminated']	--predicate operands can be full paths
+		// Reservations/*[Instances/*/State/Name@ != 'terminated']
+		// Reservations/*/Instances/*/Tags/*/[Key@ = '?'] -- wildcard value for predicate
+		
+	//Examples for Tags data
+		// Tags/*[ResourceType@ = 'security-group'][Key@ = 'Name']/Value@
+		// Tags/*[ResourceType@ = 'instance'][Key@ = 'Name']
+		// Tags/*/[ResourceType@ = 'internet-gateway']
+		
+	/*Watch out for
+		//			this returns all objects that are NOT arrays.  Attributes (strings, numbers) are ignored.
+		//			this gets replaced with '#', so you can sort of use # whereever // occurs
+		//			in xpath //*[//@attr = 'val'], the context of predicate is root of the doc.  In JutzPath (at the moment anyway) the predicate would be assumed to be [.//@attr = 'val']
+		attr@		@ is at the end of the attr name, not beginning as in xpath
+		*@			Attribute wildcards are not implemented
+		*			If you want to navigate through an array you need a * as in "//Tags/ * /@Key"   (but with no spaces)
+		*			* can operate with an object as context.  * on its own returns all child objects of current context.
+		//*			This returns all nodes (not arrays) that have parents.		Equivaent to #*
+		//			The context for the // must be an object - which can make use of this axis confusing.
+						If the context is an array, you first need to select array members with *, then you can add //. 
+						In random test data,Y is an array so you can have //Y//j@ which gives all j attributes underneath a Y object
+						However X is an array, and //X//j@ yields nothing.  We need //X/ * //j@ (no spaces)
+					
+		
+		ALSO NOTE:  the d3 tree is not an exact representation of the underlying data in as much as elements in a json array have no names as in {Instances: [{instance_id: 'a'}, {instance_id: 'b'}]}
+		this is represented in the d3 tree as 
+			Instance
+				instance_id: 'a'
+			Instance
+				instance_id: 'b'
+		
+		The text 'Instance' in this case simply comes from lopping off the last letter of the name of the array - without even checking if this is an 's'.  This is done in function traverse(obj, new_obj, instance) 
+		
+		When searching the data, however, there is no Object called 'Instance' so do not include it in the path.  Here we would use Instances/*
+		
+		The same goes for Tag elements in ec2Tags
+	/*
+		NOT possible (yet)
+		
+		attribute wildcards			It might be useful to be able to retrieve more than one attribute in a given select.
+		
+		aggregation functions.  	The plan was at some point to allow an 'axis' such as : to denote a following function name (as in :myFunc), calling myFunc(cx) and that function, 
+				which could be a count function for example, would return a new context eg {count: 123} or inject a value into cx.    name(.) might be useful.
+						
+		parent / ancestral axes.  	There are various possibilities here, none of which have been explored yet.  If you use d3, a parent reference is added to each node, in which case you can treat parents
+				as if they were children.
+		
+		grouping					The ec2Tags data set is essentially a flat list of tags, which is not ideal for display purposes.  It would be nice to group on both resource type and resource id 
+				and list all tags as children of the resource.  At the moment the resourceId is duplicated.  One would need both aggregation functions (distinct list) and parental axes
+		
+		parameterised queries.  	[@attr = $myVar].  It would be nice to compile a curried search function that could take a parameter - at the moment any unique expression needs its own compilation.  
+				An alternative would be to pass an array of parameters (pproperty bag) into the query - this array would be passed to each context and the functions there could help themselves to any data they needed.
+				
+		indexed searches			For large data sets, instead of [@key = 'value'] you could have a predicate such as {@key = $myVar} which would instruct the compiler to build eg a btree index on @key and use that 
+				for subsequent parameterised queries.  Haven't come across a use case yet for such offline queries
+				
+		xpath style testing for attributes.  Tags[Key@ = '?'] would be more nicely expressed as Tags[Key@]
+	*/
+	
+	/*
+	d3 tree
+		Source of this comes from https://bl.ocks.org/mbostock/4339083 and changed to suit - mainly in adding click events and css classes for circles.
+		
+		Structure that the tree expects is 
+		container
+			display attribute
+			children array of containers (optional)
+			
+			for example
+			{
+				"display": "Subnets",
+				"children": [
+					{
+					  "display": "vpc-a2d0acc7",
+					  "children": [
+						{
+						  "display": "State: available",					  
+						},
+						{
+						  "display": "CidrBlock: 172.32.0.0\/22",					  
+						}
+					  ]
+					},
+					{ ...more children...}	
+				]
+			}	
+			
+			where a container does not have children, a children array can be present - but this will affect the colour of the circle representing the node in the d3 tree - it will think there are children.  
+			It could do a count, but does not at the  moment.
+			
+			EC2 data is converted into this format by function traverse(obj, new_obj, instance) 
+				where
+				obj = source data
+				new_obj = d3-tree ready data
+				instance - the text to use as place holder for objects found in an array.  The traverse function simply assumes that array names have an 's' on the end and knocks it off when processing children
+				
+			source data is housed in dictionary:  ec2_query_dict
+			the dictionary a stores reference to data set and also to a template to use where necessary.
+			ec2_query_dict["ec2Subnets"] = {data: ec2Subnets, template: subNetTemplate};
+		
+			The dictionary links to the top left select via the select box value attribute.
+			
+			onChange, the select box calls newQuery
+			
+			When rendered, the root element in each of the non-filtered data sets is hard coded to "eu-west-1 (in function getQuery).  You will need to change this
+	*/
+	
+	/*
+		Creating templates
+		
+		There are 3 example templates here  search for:
+		var subNetTemplate = [ ...
+		var instanceTemplate = [...		
+		var tagTemplate = [...
+		
+		processing is done by function transformData(data, template, new_obj)
+		where 
+			data = source data
+			template = array - one for each child node ot be created
+			new_obj = array in which into insert new data item (this is an accumulator)
+			
+		When new_obj has been created it will be an array
+		
+		Structure for template  is 
+		
+		Array of
+			Container
+				label and_or key
+				children array of containers
+				
+		For every container a node in the tree is created
+		
+		If label attribute is present, that text is used as is.
+		if key attribute is present the attribute text is compiled and executed against current data contextt and the result used
+		if both key and label attributes are present the 2 are concatenated as in label: key_text
+		
+		The data context is then changed by compiling and executing the text found in path attribute.  This results in an array.
+		Each element of the result array is recursively processed against the template found in template.children (we are stepping down 2 trees at the same time).
+		
+		
+		[
+			{
+				label: "Subnets", path: ".", children: [
+					{
+						key: "VpcId@", path: "Subnets/*",
+						children: [{label: "State", key: "State@"}, {label: "CidrBlock", key: "CidrBlock@"}]
+					}
+				]
+			},
+			{..maybe more along the same lines..}
+		]
+		
+		when finished, the data for the d3 tree will be in new_obj.  The d3 tree seems to cope fine being passed either an array oor an object, but I seuspect that
+		if the root is an array it should only have one member otherwise the tree will have more than one root. 
+	*/
+
+var showEmptyAttributes = true;
+var showEmptyArrays = true;
+
+//var cp = compileJutzPath("//*");
+var margin = {top: 20, right: 120, bottom: 20, left: 120},
+    width = 3000 - margin.right - margin.left,
+    height = 900 - margin.top - margin.bottom;
+    
+var i = 0,
+    duration = 750,
+    root, 
+	data_history = [],
+	ec2_query_dict = {};
+	
+	
+var tree = d3.layout.tree()
+    .size([height, width]);
+
+var diagonal = d3.svg.diagonal()
+    .projection(function(d) { return [d.y, d.x]; });
+
+var svg = d3.select("body").append("svg")
+    .attr("width", width + margin.right + margin.left)
+    .attr("height", height + margin.top + margin.bottom)
+  .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+	var randomTestData = {j:"root", A : {j : "hello", Q : {j : "hi", W : {j : "qaz"}}, R : {j : "ho"}, X : [{j : "jambo", k : "hello", Y : {j : "bonjour",  Z : {j : "kilimanjaro"}}},{j : "henry", Y : {j : "charles",  Z : {j : "guten tag"}}},{j : "alastair", Y : {j : "david",  Z : {j : "hola"}}},{j : "Gerald", Y : {j : "kelly",  Z : {j : "que tal"}}}] }};
+	
+	var ec2Subnets = {
+    "Subnets": [
+        {
+            "VpcId": "vpc-a2d0acc7", 
+            "Tags": [
+                {
+                    "Value": "MEE Encoder Subnet v1.0.723-mee", 
+                    "Key": "Name"
+                }
+            ], 
+            "CidrBlock": "172.32.0.0/22", 
+            "MapPublicIpOnLaunch": true, 
+            "DefaultForAz": false, 
+            "State": "available", 
+            "AvailabilityZone": "eu-west-1a", 
+            "SubnetId": "subnet-26527143", 
+            "AvailableIpAddressCount": 1019
+        }, 
+        {
+            "VpcId": "vpc-30998e58", 
+            "CidrBlock": "172.31.32.0/20", 
+            "MapPublicIpOnLaunch": true, 
+            "DefaultForAz": true, 
+            "State": "available", 
+            "AvailabilityZone": "eu-west-1b", 
+            "SubnetId": "subnet-32998e5a", 
+            "AvailableIpAddressCount": 4090
+        }, 
+        {
+            "VpcId": "vpc-c983c9ac", 
+            "Tags": [
+                {
+                    "Value": "MEE Encoder Subnet v1.0.816-mee", 
+                    "Key": "Name"
+                }, 
+                {
+                    "Value": "2015-11-26:06:58:34", 
+                    "Key": "CreationDate"
+                }
+            ], 
+            "CidrBlock": "172.32.8.0/22", 
+            "MapPublicIpOnLaunch": true, 
+            "DefaultForAz": false, 
+            "State": "available", 
+            "AvailabilityZone": "eu-west-1c", 
+            "SubnetId": "subnet-ed502cb4", 
+            "AvailableIpAddressCount": 1019
+        }
+    ]
+}
+
+  
+  var ec2Regions = {
+    "Regions": [
+        {
+            "Endpoint": "ec2.eu-west-1.amazonaws.com", 
+            "RegionName": "eu-west-1"
+        }, 
+        {
+            "Endpoint": "ec2.ap-southeast-1.amazonaws.com", 
+            "RegionName": "ap-southeast-1"
+        }, 
+        {
+            "Endpoint": "ec2.ap-southeast-2.amazonaws.com", 
+            "RegionName": "ap-southeast-2"
+        }, 
+        {
+            "Endpoint": "ec2.eu-central-1.amazonaws.com", 
+            "RegionName": "eu-central-1"
+        }, 
+        {
+            "Endpoint": "ec2.ap-northeast-2.amazonaws.com", 
+            "RegionName": "ap-northeast-2"
+        }, 
+        {
+            "Endpoint": "ec2.ap-northeast-1.amazonaws.com", 
+            "RegionName": "ap-northeast-1"
+        }, 
+        {
+            "Endpoint": "ec2.us-east-1.amazonaws.com", 
+            "RegionName": "us-east-1"
+        }, 
+        {
+            "Endpoint": "ec2.sa-east-1.amazonaws.com", 
+            "RegionName": "sa-east-1"
+        }, 
+        {
+            "Endpoint": "ec2.us-west-1.amazonaws.com", 
+            "RegionName": "us-west-1"
+        }, 
+        {
+            "Endpoint": "ec2.us-west-2.amazonaws.com", 
+            "RegionName": "us-west-2"
+        }
+    ]
+}
+
+
+var ec2Vpcs = {
+    "Vpcs": [
+        {
+            "VpcId": "vpc-ee2e658b", 
+            "InstanceTenancy": "default", 
+            "Tags": [
+                {
+                    "Value": "2015-11-23:19:43:32", 
+                    "Key": "CreationDate"
+                }, 
+                {
+                    "Value": "MEE Encoder VPC v1.0.802-mee", 
+                    "Key": "Name"
+                }
+            ], 
+            "State": "available", 
+            "DhcpOptionsId": "dopt-0b998e63", 
+            "CidrBlock": "172.32.0.0/16", 
+            "IsDefault": false
+        }, 
+        {
+            "VpcId": "vpc-fe94819b", 
+            "InstanceTenancy": "default", 
+            "Tags": [
+                {
+                    "Value": "MEE Encoder VPC v1.0.817-mee", 
+                    "Key": "Name"
+                }, 
+                {
+                    "Value": "2016-03-17:15:20:58", 
+                    "Key": "CreationDate"
+                }
+            ], 
+            "State": "available", 
+            "DhcpOptionsId": "dopt-0b998e63", 
+            "CidrBlock": "172.32.0.0/16", 
+            "IsDefault": false
+        }, 
+        {
+            "VpcId": "vpc-a2d0acc7", 
+            "InstanceTenancy": "default", 
+            "Tags": [
+                {
+                    "Value": "2015-10-20:18:33:56", 
+                    "Key": "CreationDate"
+                }, 
+                {
+                    "Value": "MEE Encoder VPC v1.0.723-mee", 
+                    "Key": "Name"
+                }
+            ], 
+            "State": "available", 
+            "DhcpOptionsId": "dopt-0b998e63", 
+            "CidrBlock": "172.32.0.0/16", 
+            "IsDefault": false
+        }, 
+        {
+            "VpcId": "vpc-30998e58", 
+            "InstanceTenancy": "default", 
+            "State": "available", 
+            "DhcpOptionsId": "dopt-0b998e63", 
+            "CidrBlock": "172.31.0.0/16", 
+            "IsDefault": true
+        }, 
+        {
+            "VpcId": "vpc-c983c9ac", 
+            "InstanceTenancy": "default", 
+            "Tags": [
+                {
+                    "Value": "2015-11-26:06:58:34", 
+                    "Key": "CreationDate"
+                }, 
+                {
+                    "Value": "MEE Encoder VPC v1.0.816-mee", 
+                    "Key": "Name"
+                }
+            ], 
+            "State": "available", 
+            "DhcpOptionsId": "dopt-0b998e63", 
+            "CidrBlock": "172.32.0.0/16", 
+            "IsDefault": false
+        }
+    ]
+}
+
+var ec2AcctAttributes = {
+    "AccountAttributes": [
+        {
+            "AttributeName": "supported-platforms", 
+            "AttributeValues": [
+                {
+                    "AttributeValue": "VPC"
+                }
+            ]
+        }, 
+        {
+            "AttributeName": "vpc-max-security-groups-per-interface", 
+            "AttributeValues": [
+                {
+                    "AttributeValue": "5"
+                }
+            ]
+        }, 
+        {
+            "AttributeName": "max-elastic-ips", 
+            "AttributeValues": [
+                {
+                    "AttributeValue": "5"
+                }
+            ]
+        }, 
+        {
+            "AttributeName": "max-instances", 
+            "AttributeValues": [
+                {
+                    "AttributeValue": "200"
+                }
+            ]
+        }, 
+        {
+            "AttributeName": "vpc-max-elastic-ips", 
+            "AttributeValues": [
+                {
+                    "AttributeValue": "5"
+                }
+            ]
+        }, 
+        {
+            "AttributeName": "default-vpc", 
+            "AttributeValues": [
+                {
+                    "AttributeValue": "vpc-30998e58"
+                }
+            ]
+        }
+    ]
+}
+
+
+var ec2Instances = {
+    "Reservations": [
+        {
+            "OwnerId": "922162411906", 
+            "ReservationId": "r-ea9e114b", 
+            "Groups": [], 
+            "Instances": [
+                {
+                    "Monitoring": {
+                        "State": "disabled"
+                    }, 
+                    "PublicDnsName": "ec2-54-229-23-60.eu-west-1.compute.amazonaws.com", 
+                    "State": {
+                        "Code": 16, 
+                        "Name": "running"
+                    }, 
+                    "EbsOptimized": false, 
+                    "LaunchTime": "2015-11-02T17:19:33.000Z", 
+                    "PublicIpAddress": "54.229.23.60", 
+                    "PrivateIpAddress": "172.31.44.218", 
+                    "ProductCodes": [
+                        {
+                            "ProductCodeId": "6x5jmcajty9edm3f211pqjfn2", 
+                            "ProductCodeType": "marketplace"
+                        }
+                    ], 
+                    "VpcId": "vpc-30998e58", 
+                    "StateTransitionReason": "", 
+                    "InstanceId": "i-2c94c195", 
+                    "ImageId": "ami-7b033f0c", 
+                    "PrivateDnsName": "ip-172-31-44-218.eu-west-1.compute.internal", 
+                    "KeyName": "LinuxEncoder", 
+                    "SecurityGroups": [
+                        {
+                            "GroupName": "playlist_proxy", 
+                            "GroupId": "sg-f90cbf9d"
+                        }
+                    ], 
+                    "ClientToken": "LoyoD1446484772417", 
+                    "SubnetId": "subnet-32998e5a", 
+                    "InstanceType": "t2.micro", 
+                    "NetworkInterfaces": [
+                        {
+                            "Status": "in-use", 
+                            "MacAddress": "06:9c:5c:fe:4e:d7", 
+                            "SourceDestCheck": true, 
+                            "VpcId": "vpc-30998e58", 
+                            "Description": "", 
+                            "Association": {
+                                "PublicIp": "54.229.23.60", 
+                                "PublicDnsName": "ec2-54-229-23-60.eu-west-1.compute.amazonaws.com", 
+                                "IpOwnerId": "922162411906"
+                            }, 
+                            "NetworkInterfaceId": "eni-e6926bae", 
+                            "PrivateIpAddresses": [
+                                {
+                                    "PrivateDnsName": "ip-172-31-44-218.eu-west-1.compute.internal", 
+                                    "Association": {
+                                        "PublicIp": "54.229.23.60", 
+                                        "PublicDnsName": "ec2-54-229-23-60.eu-west-1.compute.amazonaws.com", 
+                                        "IpOwnerId": "922162411906"
+                                    }, 
+                                    "Primary": true, 
+                                    "PrivateIpAddress": "172.31.44.218"
+                                }
+                            ], 
+                            "PrivateDnsName": "ip-172-31-44-218.eu-west-1.compute.internal", 
+                            "Attachment": {
+                                "Status": "attached", 
+                                "DeviceIndex": 0, 
+                                "DeleteOnTermination": true, 
+                                "AttachmentId": "eni-attach-22204f0e", 
+                                "AttachTime": "2015-11-02T17:19:33.000Z"
+                            }, 
+                            "Groups": [
+                                {
+                                    "GroupName": "playlist_proxy", 
+                                    "GroupId": "sg-f90cbf9d"
+                                }
+                            ], 
+                            "SubnetId": "subnet-32998e5a", 
+                            "OwnerId": "922162411906", 
+                            "PrivateIpAddress": "172.31.44.218"
+                        }
+                    ], 
+                    "SourceDestCheck": true, 
+                    "Placement": {
+                        "Tenancy": "default", 
+                        "GroupName": "", 
+                        "AvailabilityZone": "eu-west-1b"
+                    }, 
+                    "Hypervisor": "xen", 
+                    "BlockDeviceMappings": [
+                        {
+                            "DeviceName": "/dev/sda1", 
+                            "Ebs": {
+                                "Status": "attached", 
+                                "DeleteOnTermination": true, 
+                                "VolumeId": "vol-8948a27a", 
+                                "AttachTime": "2015-11-02T17:19:35.000Z"
+                            }
+                        }
+                    ], 
+                    "Architecture": "x86_64", 
+                    "RootDeviceType": "ebs", 
+                    "IamInstanceProfile": {
+                        "Id": "AIPAJ3WY6DL3JB4BJQF4K", 
+                        "Arn": "arn:aws:iam::922162411906:instance-profile/vee_encoder"
+                    }, 
+                    "RootDeviceName": "/dev/sda1", 
+                    "VirtualizationType": "hvm", 
+                    "Tags": [
+                        {
+                            "Value": "HLS Playlist Proxy", 
+                            "Key": "Name"
+                        }
+                    ], 
+                    "AmiLaunchIndex": 0
+                }
+            ]
+        }, 
+        {
+            "OwnerId": "922162411906", 
+            "ReservationId": "r-cd1c166b", 
+            "Groups": [], 
+            "Instances": [
+                {
+                    "Monitoring": {
+                        "State": "disabled"
+                    }, 
+                    "PublicDnsName": "ec2-52-16-253-139.eu-west-1.compute.amazonaws.com", 
+                    "State": {
+                        "Code": 16, 
+                        "Name": "running"
+                    }, 
+                    "EbsOptimized": false, 
+                    "LaunchTime": "2016-04-08T08:50:09.000Z", 
+                    "PublicIpAddress": "52.16.253.139", 
+                    "PrivateIpAddress": "172.32.1.156", 
+                    "ProductCodes": [
+                        {
+                            "ProductCodeId": "6x5jmcajty9edm3f211pqjfn2", 
+                            "ProductCodeType": "marketplace"
+                        }
+                    ], 
+                    "VpcId": "vpc-fe94819b", 
+                    "StateTransitionReason": "", 
+                    "InstanceId": "i-2a0877a2", 
+                    "ImageId": "ami-63850510", 
+                    "PrivateDnsName": "ip-172-32-1-156.eu-west-1.compute.internal", 
+                    "SecurityGroups": [
+                        {
+                            "GroupName": "default", 
+                            "GroupId": "sg-324d5856"
+                        }
+                    ], 
+                    "ClientToken": "468757-105401-1460", 
+                    "SubnetId": "subnet-e78c7383", 
+                    "InstanceType": "c4.4xlarge", 
+                    "NetworkInterfaces": [
+                        {
+                            "Status": "in-use", 
+                            "MacAddress": "02:9a:92:7f:40:27", 
+                            "SourceDestCheck": true, 
+                            "VpcId": "vpc-fe94819b", 
+                            "Description": "", 
+                            "Association": {
+                                "PublicIp": "52.16.253.139", 
+                                "PublicDnsName": "ec2-52-16-253-139.eu-west-1.compute.amazonaws.com", 
+                                "IpOwnerId": "amazon"
+                            }, 
+                            "NetworkInterfaceId": "eni-c33c4aba", 
+                            "PrivateIpAddresses": [
+                                {
+                                    "PrivateDnsName": "ip-172-32-1-156.eu-west-1.compute.internal", 
+                                    "Association": {
+                                        "PublicIp": "52.16.253.139", 
+                                        "PublicDnsName": "ec2-52-16-253-139.eu-west-1.compute.amazonaws.com", 
+                                        "IpOwnerId": "amazon"
+                                    }, 
+                                    "Primary": true, 
+                                    "PrivateIpAddress": "172.32.1.156"
+                                }
+                            ], 
+                            "PrivateDnsName": "ip-172-32-1-156.eu-west-1.compute.internal", 
+                            "Attachment": {
+                                "Status": "attached", 
+                                "DeviceIndex": 0, 
+                                "DeleteOnTermination": true, 
+                                "AttachmentId": "eni-attach-17ae9df3", 
+                                "AttachTime": "2016-04-08T08:50:09.000Z"
+                            }, 
+                            "Groups": [
+                                {
+                                    "GroupName": "default", 
+                                    "GroupId": "sg-324d5856"
+                                }
+                            ], 
+                            "SubnetId": "subnet-e78c7383", 
+                            "OwnerId": "922162411906", 
+                            "PrivateIpAddress": "172.32.1.156"
+                        }
+                    ], 
+                    "SourceDestCheck": true, 
+                    "Placement": {
+                        "Tenancy": "default", 
+                        "GroupName": "", 
+                        "AvailabilityZone": "eu-west-1a"
+                    }, 
+                    "Hypervisor": "xen", 
+                    "BlockDeviceMappings": [
+                        {
+                            "DeviceName": "/dev/sda1", 
+                            "Ebs": {
+                                "Status": "attached", 
+                                "DeleteOnTermination": true, 
+                                "VolumeId": "vol-66d0efa4", 
+                                "AttachTime": "2016-04-08T08:50:09.000Z"
+                            }
+                        }
+                    ], 
+                    "Architecture": "x86_64", 
+                    "RootDeviceType": "ebs", 
+                    "IamInstanceProfile": {
+                        "Id": "AIPAJ3WY6DL3JB4BJQF4K", 
+                        "Arn": "arn:aws:iam::922162411906:instance-profile/vee_encoder"
+                    }, 
+                    "RootDeviceName": "/dev/sda1", 
+                    "VirtualizationType": "hvm", 
+                    "Tags": [
+                        {
+                            "Value": "468757-105401-1460", 
+                            "Key": "Host"
+                        }, 
+                        {
+                            "Value": "QA-A MEE Encoder", 
+                            "Key": "Name"
+                        }
+                    ], 
+                    "AmiLaunchIndex": 0
+                }
+            ]
+        }, 
+        {
+            "OwnerId": "922162411906", 
+            "ReservationId": "r-fdf48c44", 
+            "Groups": [], 
+            "Instances": [
+                {
+                    "Monitoring": {
+                        "State": "disabled"
+                    }, 
+                    "PublicDnsName": "ec2-52-30-240-24.eu-west-1.compute.amazonaws.com", 
+                    "State": {
+                        "Code": 16, 
+                        "Name": "running"
+                    }, 
+                    "EbsOptimized": false, 
+                    "LaunchTime": "2016-04-08T08:51:42.000Z", 
+                    "PublicIpAddress": "52.30.240.24", 
+                    "PrivateIpAddress": "172.32.4.126", 
+                    "ProductCodes": [
+                        {
+                            "ProductCodeId": "6x5jmcajty9edm3f211pqjfn2", 
+                            "ProductCodeType": "marketplace"
+                        }
+                    ], 
+                    "VpcId": "vpc-fe94819b", 
+                    "StateTransitionReason": "", 
+                    "InstanceId": "i-a555da2f", 
+                    "ImageId": "ami-63850510", 
+                    "PrivateDnsName": "ip-172-32-4-126.eu-west-1.compute.internal", 
+                    "SecurityGroups": [
+                        {
+                            "GroupName": "default", 
+                            "GroupId": "sg-324d5856"
+                        }
+                    ], 
+                    "ClientToken": "686600-105493-1460", 
+                    "SubnetId": "subnet-59789c2f", 
+                    "InstanceType": "c4.2xlarge", 
+                    "NetworkInterfaces": [
+                        {
+                            "Status": "in-use", 
+                            "MacAddress": "06:ca:44:8f:f4:f1", 
+                            "SourceDestCheck": true, 
+                            "VpcId": "vpc-fe94819b", 
+                            "Description": "", 
+                            "Association": {
+                                "PublicIp": "52.30.240.24", 
+                                "PublicDnsName": "ec2-52-30-240-24.eu-west-1.compute.amazonaws.com", 
+                                "IpOwnerId": "amazon"
+                            }, 
+                            "NetworkInterfaceId": "eni-2d2c2166", 
+                            "PrivateIpAddresses": [
+                                {
+                                    "PrivateDnsName": "ip-172-32-4-126.eu-west-1.compute.internal", 
+                                    "Association": {
+                                        "PublicIp": "52.30.240.24", 
+                                        "PublicDnsName": "ec2-52-30-240-24.eu-west-1.compute.amazonaws.com", 
+                                        "IpOwnerId": "amazon"
+                                    }, 
+                                    "Primary": true, 
+                                    "PrivateIpAddress": "172.32.4.126"
+                                }
+                            ], 
+                            "PrivateDnsName": "ip-172-32-4-126.eu-west-1.compute.internal", 
+                            "Attachment": {
+                                "Status": "attached", 
+                                "DeviceIndex": 0, 
+                                "DeleteOnTermination": true, 
+                                "AttachmentId": "eni-attach-9b461759", 
+                                "AttachTime": "2016-04-08T08:51:42.000Z"
+                            }, 
+                            "Groups": [
+                                {
+                                    "GroupName": "default", 
+                                    "GroupId": "sg-324d5856"
+                                }
+                            ], 
+                            "SubnetId": "subnet-59789c2f", 
+                            "OwnerId": "922162411906", 
+                            "PrivateIpAddress": "172.32.4.126"
+                        }
+                    ], 
+                    "SourceDestCheck": true, 
+                    "Placement": {
+                        "Tenancy": "default", 
+                        "GroupName": "", 
+                        "AvailabilityZone": "eu-west-1b"
+                    }, 
+                    "Hypervisor": "xen", 
+                    "BlockDeviceMappings": [
+                        {
+                            "DeviceName": "/dev/sda1", 
+                            "Ebs": {
+                                "Status": "attached", 
+                                "DeleteOnTermination": true, 
+                                "VolumeId": "vol-46c543b4", 
+                                "AttachTime": "2016-04-08T08:51:43.000Z"
+                            }
+                        }
+                    ], 
+                    "Architecture": "x86_64", 
+                    "RootDeviceType": "ebs", 
+                    "IamInstanceProfile": {
+                        "Id": "AIPAJ3WY6DL3JB4BJQF4K", 
+                        "Arn": "arn:aws:iam::922162411906:instance-profile/vee_encoder"
+                    }, 
+                    "RootDeviceName": "/dev/sda1", 
+                    "VirtualizationType": "hvm", 
+                    "Tags": [
+                        {
+                            "Value": "QA-A MEE Encoder", 
+                            "Key": "Name"
+                        }, 
+                        {
+                            "Value": "686600-105493-1460", 
+                            "Key": "Host"
+                        }
+                    ], 
+                    "AmiLaunchIndex": 0
+                }
+            ]
+        }, 
+        {
+            "OwnerId": "922162411906", 
+            "ReservationId": "r-3ea80086", 
+            "Groups": [], 
+            "Instances": [
+                {
+                    "Monitoring": {
+                        "State": "disabled"
+                    }, 
+                    "PublicDnsName": "ec2-52-16-195-66.eu-west-1.compute.amazonaws.com", 
+                    "State": {
+                        "Code": 16, 
+                        "Name": "running"
+                    }, 
+                    "EbsOptimized": false, 
+                    "LaunchTime": "2016-04-08T08:48:36.000Z", 
+                    "PublicIpAddress": "52.16.195.66", 
+                    "PrivateIpAddress": "172.32.8.123", 
+                    "ProductCodes": [
+                        {
+                            "ProductCodeId": "6x5jmcajty9edm3f211pqjfn2", 
+                            "ProductCodeType": "marketplace"
+                        }
+                    ], 
+                    "VpcId": "vpc-fe94819b", 
+                    "StateTransitionReason": "", 
+                    "InstanceId": "i-efd10c63", 
+                    "ImageId": "ami-63850510", 
+                    "PrivateDnsName": "ip-172-32-8-123.eu-west-1.compute.internal", 
+                    "SecurityGroups": [
+                        {
+                            "GroupName": "default", 
+                            "GroupId": "sg-324d5856"
+                        }
+                    ], 
+                    "ClientToken": "505051-105308-1460", 
+                    "SubnetId": "subnet-9bd5e9c2", 
+                    "InstanceType": "c4.4xlarge", 
+                    "NetworkInterfaces": [
+                        {
+                            "Status": "in-use", 
+                            "MacAddress": "0a:a3:cb:7c:23:61", 
+                            "SourceDestCheck": true, 
+                            "VpcId": "vpc-fe94819b", 
+                            "Description": "", 
+                            "Association": {
+                                "PublicIp": "52.16.195.66", 
+                                "PublicDnsName": "ec2-52-16-195-66.eu-west-1.compute.amazonaws.com", 
+                                "IpOwnerId": "amazon"
+                            }, 
+                            "NetworkInterfaceId": "eni-6f139532", 
+                            "PrivateIpAddresses": [
+                                {
+                                    "PrivateDnsName": "ip-172-32-8-123.eu-west-1.compute.internal", 
+                                    "Association": {
+                                        "PublicIp": "52.16.195.66", 
+                                        "PublicDnsName": "ec2-52-16-195-66.eu-west-1.compute.amazonaws.com", 
+                                        "IpOwnerId": "amazon"
+                                    }, 
+                                    "Primary": true, 
+                                    "PrivateIpAddress": "172.32.8.123"
+                                }
+                            ], 
+                            "PrivateDnsName": "ip-172-32-8-123.eu-west-1.compute.internal", 
+                            "Attachment": {
+                                "Status": "attached", 
+                                "DeviceIndex": 0, 
+                                "DeleteOnTermination": true, 
+                                "AttachmentId": "eni-attach-2cc40dd5", 
+                                "AttachTime": "2016-04-08T08:48:36.000Z"
+                            }, 
+                            "Groups": [
+                                {
+                                    "GroupName": "default", 
+                                    "GroupId": "sg-324d5856"
+                                }
+                            ], 
+                            "SubnetId": "subnet-9bd5e9c2", 
+                            "OwnerId": "922162411906", 
+                            "PrivateIpAddress": "172.32.8.123"
+                        }
+                    ], 
+                    "SourceDestCheck": true, 
+                    "Placement": {
+                        "Tenancy": "default", 
+                        "GroupName": "", 
+                        "AvailabilityZone": "eu-west-1c"
+                    }, 
+                    "Hypervisor": "xen", 
+                    "BlockDeviceMappings": [
+                        {
+                            "DeviceName": "/dev/sda1", 
+                            "Ebs": {
+                                "Status": "attached", 
+                                "DeleteOnTermination": true, 
+                                "VolumeId": "vol-a1e58a1f", 
+                                "AttachTime": "2016-04-08T08:48:36.000Z"
+                            }
+                        }
+                    ], 
+                    "Architecture": "x86_64", 
+                    "RootDeviceType": "ebs", 
+                    "IamInstanceProfile": {
+                        "Id": "AIPAJ3WY6DL3JB4BJQF4K", 
+                        "Arn": "arn:aws:iam::922162411906:instance-profile/vee_encoder"
+                    }, 
+                    "RootDeviceName": "/dev/sda1", 
+                    "VirtualizationType": "hvm", 
+                    "Tags": [
+                        {
+                            "Value": "505051-105308-1460", 
+                            "Key": "Host"
+                        }, 
+                        {
+                            "Value": "QA-A MEE Encoder", 
+                            "Key": "Name"
+                        }
+                    ], 
+                    "AmiLaunchIndex": 0
+                }
+            ]
+        }, 
+        {
+            "OwnerId": "922162411906", 
+            "ReservationId": "r-60f28ad9", 
+            "Groups": [], 
+            "Instances": [
+                {
+                    "Monitoring": {
+                        "State": "disabled"
+                    }, 
+                    "PublicDnsName": "", 
+                    "RootDeviceType": "ebs", 
+                    "State": {
+                        "Code": 48, 
+                        "Name": "terminated"
+                    }, 
+                    "EbsOptimized": false, 
+                    "LaunchTime": "2016-04-08T08:46:00.000Z", 
+                    "ProductCodes": [], 
+                    "StateTransitionReason": "User initiated (2016-04-08 10:04:22 GMT)", 
+                    "InstanceId": "i-b35ad539", 
+                    "ImageId": "ami-63850510", 
+                    "PrivateDnsName": "", 
+                    "SecurityGroups": [], 
+                    "ClientToken": "359186-105152-1460", 
+                    "InstanceType": "c4.large", 
+                    "NetworkInterfaces": [], 
+                    "Placement": {
+                        "Tenancy": "default", 
+                        "GroupName": "", 
+                        "AvailabilityZone": "eu-west-1b"
+                    }, 
+                    "Hypervisor": "xen", 
+                    "BlockDeviceMappings": [], 
+                    "Architecture": "x86_64", 
+                    "StateReason": {
+                        "Message": "Client.UserInitiatedShutdown: User initiated shutdown", 
+                        "Code": "Client.UserInitiatedShutdown"
+                    }, 
+                    "RootDeviceName": "/dev/sda1", 
+                    "VirtualizationType": "hvm", 
+                    "Tags": [
+                        {
+                            "Value": "QA-A MEE Encoder", 
+                            "Key": "Name"
+                        }, 
+                        {
+                            "Value": "359186-105152-1460", 
+                            "Key": "Host"
+                        }
+                    ], 
+                    "AmiLaunchIndex": 0
+                }
+            ]
+        }
+    ]
+}
+
+var ec2Tags = {
+    "Tags": [
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-2520db41", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-2520db41", 
+            "Value": "MEE Encoder Route Table v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-36b4e653", 
+            "Value": "2015-10-20:18:33:56", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-36b4e653", 
+            "Value": "MEE Encoder Route Table v1.0.723-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-3fd2e75a", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-3fd2e75a", 
+            "Value": "MEE Encoder Route Table v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-b39eb5d6", 
+            "Value": "2015-11-23:19:43:32", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "route-table", 
+            "ResourceId": "rtb-b39eb5d6", 
+            "Value": "MEE Encoder Route Table v1.0.802-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "instance", 
+            "ResourceId": "i-2a0877a2", 
+            "Value": "468757-105401-1460", 
+            "Key": "Host"
+        }, 
+        {
+            "ResourceType": "instance", 
+            "ResourceId": "i-2a0877a2", 
+            "Value": "QA-A MEE Encoder", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "instance", 
+            "ResourceId": "i-2c94c195", 
+            "Value": "HLS Playlist Proxy", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "instance", 
+            "ResourceId": "i-efd10c63", 
+            "Value": "505051-105308-1460", 
+            "Key": "Host"
+        }, 
+        {
+            "ResourceType": "instance", 
+            "ResourceId": "i-efd10c63", 
+            "Value": "QA-A MEE Encoder", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-a2d0acc7", 
+            "Value": "2015-10-20:18:33:56", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-a2d0acc7", 
+            "Value": "MEE Encoder VPC v1.0.723-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-c983c9ac", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-c983c9ac", 
+            "Value": "MEE Encoder VPC v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-ee2e658b", 
+            "Value": "2015-11-23:19:43:32", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-ee2e658b", 
+            "Value": "MEE Encoder VPC v1.0.802-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-fe94819b", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "vpc", 
+            "ResourceId": "vpc-fe94819b", 
+            "Value": "MEE Encoder VPC v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-324d5856", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-324d5856", 
+            "Value": "MEE Encoder Security Group v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-9be34fff", 
+            "Value": "2015-10-20:18:33:56", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-9be34fff", 
+            "Value": "MEE Encoder Security Group v1.0.723-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-c363f6a7", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-c363f6a7", 
+            "Value": "MEE Encoder Security Group v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-d40b83b0", 
+            "Value": "2015-11-23:19:43:32", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-d40b83b0", 
+            "Value": "MEE Encoder Security Group v1.0.802-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-db63f6bf", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-db63f6bf", 
+            "Value": "MEE SIP Registrar Security Group v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-df63f6bb", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-df63f6bb", 
+            "Value": "MEE Playlist Proxy Security Group v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-e44d5880", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-e44d5880", 
+            "Value": "MEE Playlist Proxy Security Group v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-e94d588d", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-e94d588d", 
+            "Value": "MEE Grit Relay Security Group v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-fe4d589a", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "security-group", 
+            "ResourceId": "sg-fe4d589a", 
+            "Value": "MEE SIP Registrar Security Group v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-1579e970", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-1579e970", 
+            "Value": "MEE Encoder Internet Gateway v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-6b6d170e", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-6b6d170e", 
+            "Value": "MEE Encoder Internet Gateway v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-fe65f49b", 
+            "Value": "2015-11-23:19:43:32", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-fe65f49b", 
+            "Value": "MEE Encoder Internet Gateway v1.0.802-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-ffb93a9a", 
+            "Value": "2015-10-20:18:33:56", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "internet-gateway", 
+            "ResourceId": "igw-ffb93a9a", 
+            "Value": "MEE Encoder Internet Gateway v1.0.723-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-26527143", 
+            "Value": "2015-10-20:18:33:56", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-26527143", 
+            "Value": "MEE Encoder Subnet v1.0.723-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-41197b18", 
+            "Value": "2015-10-20:18:33:56", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-41197b18", 
+            "Value": "MEE Encoder Subnet v1.0.723-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-45155e32", 
+            "Value": "2015-10-20:18:33:56", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-45155e32", 
+            "Value": "MEE Encoder Subnet v1.0.723-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-59789c2f", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-59789c2f", 
+            "Value": "MEE Encoder Subnet v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-6e93b619", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-6e93b619", 
+            "Value": "MEE Encoder Subnet v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-881a67d1", 
+            "Value": "2015-11-23:19:43:32", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-881a67d1", 
+            "Value": "MEE Encoder Subnet v1.0.802-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-904d71f5", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-904d71f5", 
+            "Value": "MEE Encoder Subnet v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-9bd5e9c2", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-9bd5e9c2", 
+            "Value": "MEE Encoder Subnet v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-c3b0eab4", 
+            "Value": "2015-11-23:19:43:32", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-c3b0eab4", 
+            "Value": "MEE Encoder Subnet v1.0.802-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-e6af9d83", 
+            "Value": "2015-11-23:19:43:32", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-e6af9d83", 
+            "Value": "MEE Encoder Subnet v1.0.802-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-e78c7383", 
+            "Value": "2016-03-17:15:20:58", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-e78c7383", 
+            "Value": "MEE Encoder Subnet v1.0.817-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-ed502cb4", 
+            "Value": "2015-11-26:06:58:34", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "subnet", 
+            "ResourceId": "subnet-ed502cb4", 
+            "Value": "MEE Encoder Subnet v1.0.816-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-1241e761", 
+            "Value": "2015-12-03:20:04:35", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-1241e761", 
+            "Value": "MEE Encoder AMI v1.0.841-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-1241e761", 
+            "Value": "MEE Encoder AMI v1.0.841-mee", 
+            "Key": "Type"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-1b148c6c", 
+            "Value": "VEE 2.0 Encoder Image", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-1b148c6c", 
+            "Value": "VEE 2.0 Encoder Image", 
+            "Key": "Type"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-63850510", 
+            "Value": "2016-04-05:12:11:10", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-63850510", 
+            "Value": "MEE Encoder AMI v1.0.1010-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-63850510", 
+            "Value": "MEE Encoder AMI v1.0.1010-mee", 
+            "Key": "Type"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-7b033f0c", 
+            "Value": "2015-10-20:20:45:05", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-7b033f0c", 
+            "Value": "MEE Encoder AMI v1.0.725-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-7b033f0c", 
+            "Value": "MEE Encoder AMI v1.0.725-mee", 
+            "Key": "Type"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-87a206f4", 
+            "Value": "2015-11-24:21:54:26", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-87a206f4", 
+            "Value": "MEE Encoder AMI v1.0.808-mee", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-87a206f4", 
+            "Value": "MEE Encoder AMI v1.0.808-mee", 
+            "Key": "Type"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-ed84b29a", 
+            "Value": "2015-10-09:05:10:03", 
+            "Key": "CreationDate"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-ed84b29a", 
+            "Value": "VEE Encoder AMI 2.1.2", 
+            "Key": "Name"
+        }, 
+        {
+            "ResourceType": "image", 
+            "ResourceId": "ami-ed84b29a", 
+            "Value": "VEE Encoder AMI 2.1.2", 
+            "Key": "Type"
+        }
+    ]
+}
+
+var link_fields = {};
+link_fields["VpcId"] = {link_data: "ec2Vpcs", path: "Vpcs/*[VpcId@ = '$']"};
+
+//this 'template' extracts data from ec2Subnets
+var subNetTemplate = [
+	{label: "Subnets", path: ".", children: [
+			{
+				key: "VpcId@", path: "Subnets/*",
+				children: [{label: "State", key: "State@"}, {label: "CidrBlock", key: "CidrBlock@"}]
+			}
+		]}
+	];
+
+	//this 'template' extracts data from ec2Instances	
+	var instanceTemplate = [
+		{label: "Instances", path: ".", children: [
+			{
+				key: "InstanceId@", path: "Reservations/*/Instances/*",
+				children: [{label: "Name", key: "Tags/*[Key@ = 'Name']/Value@"}, {label: "PublicDnsName", key: "PublicDnsName@"}, {label: "PublicIpAddress", key: "PublicIpAddress@"}, {label: "InstanceType", key: "InstanceType@"}, {label: "LaunchTime", key: "LaunchTime@"}]
+			}
+		]}
+	];
+
+
+	//this 'template' extracts data from ec2Tags
+	var tagTemplate = [
+		{
+			label: "internet-gateway", path: ".", children: [
+			{
+				key: "ResourceId@", path: "Tags/*[ResourceType@ = 'internet-gateway']",
+					children: [
+						{label: "key", key: "Key@"},
+						{label: "value", key: "Value@"}
+					]
+			}]
+		},
+		{
+			label: "route-table", path: ".", children: [
+			{
+				key: "ResourceId@", path: "Tags/*[ResourceType@ = 'route-table']",
+					children: [
+						{label: "key", key: "Key@"},
+						{label: "value", key: "Value@"}
+					]
+			}]
+		},
+		{
+			label: "instance", path: ".", children: [
+			{
+				key: "ResourceId@", path: "Tags/*[ResourceType@ = 'instance']",
+					children: [
+						{label: "key", key: "Key@"},
+						{label: "value", key: "Value@"}
+					]
+			}]
+		},
+		{
+			label: "vpc", path: ".", children: [
+			{
+				key: "ResourceId@", path: "Tags/*[ResourceType@ = 'vpc']",
+					children: [
+						{label: "key", key: "Key@"},
+						{label: "value", key: "Value@"}
+					]
+			}]
+		},
+		{
+			label: "security-group", path: ".", children: [
+			{
+				key: "ResourceId@", path: "Tags/*[ResourceType@ = 'security-group']",
+					children: [
+						{label: "key", key: "Key@"},
+						{label: "value", key: "Value@"}
+					]
+			}]
+		},
+		{
+			label: "subnet", path: ".", children: [
+			{
+				key: "ResourceId@", path: "Tags/*[ResourceType@ = 'subnet']",
+					children: [
+						{label: "key", key: "Key@"},
+						{label: "value", key: "Value@"}
+					]
+			}]
+		},
+		{
+			label: "image", path: ".", children: [
+			{
+				key: "ResourceId@", path: "Tags/*[ResourceType@ = 'image']",
+					children: [
+						{label: "key", key: "Key@"},
+						{label: "value", key: "Value@"}
+					]
+			}]
+		}
+	];
+
+	ec2_query_dict["ec2Accts"] = {data: ec2AcctAttributes, expand: true};
+	ec2_query_dict["ec2Vpcs"] =  {data: ec2Vpcs, expand: true};
+	ec2_query_dict["ec2Instances"] = {data: ec2Instances, template: instanceTemplate, expand: false};
+	ec2_query_dict["ec2Tags"] = {data: ec2Tags, template: tagTemplate, expand: false};
+	ec2_query_dict["ec2Regions"] = {data: ec2Regions, expand: true};
+	ec2_query_dict["ec2Subnets"] = {data: ec2Subnets, template: subNetTemplate, expand: true};
+	ec2_query_dict["randomTestData"] = {data: randomTestData, expand: true};
+
+	
+function evaluateJutzPath() {
+	var jp = document.getElementById("jutzPath");
+	var jutzPath = jp.value;	
+	var compiledPath = compileJutzPath(jutzPath);
+	
+	//get the data indicated by drop down box.
+	var selectQuery = document.getElementById("selectDescribe");
+	var queryName = selectQuery.options[selectQuery.selectedIndex].value;
+	var dataObj = ec2_query_dict[queryName];
+	if (typeof(dataObj) != "undefined") {
+			
+		var ec2_data = dataObj.data;
+		
+		var result = compiledPath.findAll(ec2_data);	
+		//console.log(result);
+		var jutzData = {display: "jutzPath",  children: []};
+		traverse(result, jutzData.children);	//traverse them all at the start?
+		//set initial coords for d3 tree animation when flooating the new tree in
+		jutzData.x0 = height / 2;
+		jutzData.y0 = 0;		
+		zoomData(jutzData);
+	}
+	else {
+		alert("data not found - you may have selected one of the filtered options");
+	}
+}
+
+
+function circleClass(d) {
+ return (d.children || d._children) ? "branch" : d.link ? "data-link" : "leaf";
+}
+
+
+function traverse(obj, new_obj, instance) {	
+	var fieldNames = Object.getOwnPropertyNames(obj);
+	if (fieldNames.length > 0) {
+	
+		fieldNames.forEach(function(name, idx, array) {
+			//console.log(name);
+			
+			//if name is a number then we have an element in an array - we need to know the parent name then
+			var new_cx = {};
+			
+			if (typeof(obj[name])=="object") {
+				if( Object.prototype.toString.call( obj[name] ) == '[object Array]' ) {
+					if (obj[name].length > 0 || showEmptyArrays) {
+						new_cx = {display: name, children: []};
+						instance = name.slice(0, name.length - 1);
+					}
+					else {
+						new_cx = null;
+					}
+				}
+				else {				
+					if (isNaN(name) == false) {					
+						new_cx = {display: instance, children: []};					
+					}
+					else {
+						new_cx = {display: name, children: []};
+					}
+				}
+				if (new_cx != null) {
+					new_obj.push(new_cx);	
+					//new_obj[name] = new_cx;
+					//console.log(name, obj[name]);
+					traverse(obj[name], new_cx.children, instance );
+				}
+			}
+			else {
+				//string or number				
+				var val = obj[name];
+				if (val.length > 0 || showEmptyAttributes) {
+					var display_text = "" + name + ": "  + val;
+					var displayObj = {display: display_text};
+					var link = link_fields[name];
+					if (link != null) {
+						var p = link.path.replace("$", obj[name]);	//ideally have a form that allows the variable to be passed in to curried function
+						
+						displayObj["link"] = {link_data: link.link_data, path: p};
+					}
+			
+					new_obj.push(displayObj);				
+				}
+			}						
+		});    
+	}
+}  
+ 
+		
+
+  function collapse(d) {
+	/*if( Object.prototype.toString.call( d ) === '[object Array]' ) {
+		Console.log( 'Array!' );
+	}*/	
+    if (d.children) {
+      d._children = d.children;
+      d._children.forEach(collapse);
+      d.children = null;
+    }
+  }
+
+  function expand_all(d) {
+	if (d._children) {
+      d.children = d._children;
+      d.children.forEach(expand_all);
+      d._children = null;
+    } 
+  }
+
+  function expand_n_levels(d, n) {	
+	if (d._children) {
+      d.children = d._children;
+	  if (n > 0) {
+		d.children.forEach(function(d) {expand_n_levels(d, n-1)});
+	  }
+      d._children = null;
+    }
+	else {
+		if (d.children) {
+			d.children.forEach(function(d) {expand_n_levels(d, n)});
+		}
+	}
+  }
+  
+function update(source) {
+  // Compute the new tree layout.
+  var nodes = tree.nodes(root).reverse(),
+      links = tree.links(nodes);
+
+  // Normalize for fixed-depth.
+  nodes.forEach(function(d) { d.y = d.depth * 180; });
+
+  // Update the nodes…
+  var node = svg.selectAll("g.node")
+      .data(nodes, function(d) { return d.id || (d.id = ++i); });
+
+  // Enter any new nodes at the parent's previous position.
+  var nodeEnter = node.enter().append("g")
+	  .attr("class", function(d){return "node " + circleClass(d);})
+      .attr("transform", function(d) { return "translate(" + source.y0 + "," + source.x0 + ")"; });
+      //.on("click", click);
+
+  nodeEnter.append("circle")
+      .attr("r", 1e-6)
+      //.style("fill", function(d) { return d._children ? "red" : "#fff"; })
+	  //.style("fill", function(d) { return "green";})
+	  .on("click", click)
+	  .on("contextmenu", function(data, index) {
+		 //handle right click
+		//console.log("expand all");		
+		 //stop showing browser menu
+		 d3.event.preventDefault();
+		 if (data.children) {
+			collapse(data);
+		 }
+		 else {		 
+			 expand_all(data);		
+		}
+			 update(data);
+	});
+
+  nodeEnter.append("text")
+      .attr("x", function(d) { return d.children || d._children ? -10 : 10; })
+      .attr("dy", ".35em")
+      .attr("text-anchor", function(d) { return d.children || d._children ? "end" : "start"; })
+      .text(function(d) { return d.display; })	//edit here to collapse a text node
+      .style("fill-opacity", 1e-6)
+	  //.on("click", clack)
+	  .on("dblclick", zoomData)
+	  .on("contextmenu", function(data, index) {
+		 //handle right click
+		//console.log("expand all");		
+		 //stop showing browser menu
+		 d3.event.preventDefault();
+		  
+			//we will neeed to use jutzpath here to select all exandable leaf nodes
+			 expand_n_levels(data, 0);		
+		
+			 update(data);
+	});
+
+  // Transition nodes to their new position.
+  var nodeUpdate = node.transition()
+      .duration(duration)
+      .attr("transform", function(d) { return "translate(" + d.y + "," + d.x + ")"; });
+
+  nodeUpdate.select("circle")
+      .attr("r", 4.5)
+      //.style("fill", function(d) { return d._children ? "lightsteelblue" : "#fff"; });
+	  .attr("class", function(d) { return circleClass(d) });
+
+  nodeUpdate.select("text")
+      .style("fill-opacity", 1);
+
+  // Transition exiting nodes to the parent's new position.
+  var nodeExit = node.exit().transition()
+      .duration(duration)
+      .attr("transform", function(d) { return "translate(" + source.y + "," + source.x + ")"; })
+      .remove();
+
+  nodeExit.select("circle")
+      .attr("r", 1e-6);
+
+  nodeExit.select("text")
+      .style("fill-opacity", 1e-6);
+
+  // Update the links…
+  var link = svg.selectAll("path.link")
+      .data(links, function(d) { return d.target.id; });
+
+  // Enter any new links at the parent's previous position.
+  link.enter().insert("path", "g")
+      .attr("class", "link")
+      .attr("d", function(d) {
+        var o = {x: source.x0, y: source.y0};
+        return diagonal({source: o, target: o});
+      });	  
+
+  // Transition links to their new position.
+  link.transition()
+      .duration(duration)
+      .attr("d", diagonal);
+
+  // Transition exiting nodes to the parent's new position.
+  link.exit().transition()
+      .duration(duration)
+      .attr("d", function(d) {
+        var o = {x: source.x, y: source.y};
+        return diagonal({source: o, target: o});
+      })
+      .remove();
+	  
+
+  // Stash the old positions for transition.
+  nodes.forEach(function(d) {
+    d.x0 = d.x;
+    d.y0 = d.y;
+  });
+}
+
+// Toggle children on click.
+function click(d) {
+  if (d.children) {
+    d._children = d.children;
+    d.children = null;
+  } else {  
+    d.children = d._children;
+    d._children = null;
+  }
+  update(d);
+}
+
+function clack(d) {
+//alert("hello");
+}
+
+function zoomData(d) {	
+	if (d._zoom == true) {
+		d._zoom = false;
+		root = data_history.pop();
+	}
+
+	else {
+		data_history.push(root);
+		
+		if (typeof(d.link) != "undefined") {
+			var x = ec2_query_dict[d.link.link_data].data;
+			var path = d.link.path;
+			var compiledPath = compileJutzPath(path);
+			var link_data = compiledPath.findOne(x);
+			
+			root = {display: d.display,  children: []};
+			traverse(link_data, root.children);	//traverse them all at the start?			
+			root.x0 = height / 2;
+			root.y0 = 0;			
+		}
+		else {
+			root = d;
+		}
+		
+		root._zoom = true;		
+	}
+	update(root);
+
+}
+function newQuery() {
+	root = getQuery();	
+	update(root);
+}
+
+
+function getQuery() {
+	var selectQuery = document.getElementById("selectDescribe");
+	var queryName = selectQuery.options[selectQuery.selectedIndex].value;
+	var ec2_data = null;
+	var ec2_query = null;
+	var ec2_new = {display: "eu-west-1",  children: []};
+	if (queryName.indexOf("Filtered") > -1) {
+		ec2_new.display = queryName;
+		queryName = queryName.slice(0, queryName.length - "Filtered".length);	
+		ec2_query = ec2_query_dict[queryName];
+		ec2_data = ec2_query.data;
+		var template = ec2_query.template;
+		transformData(ec2_data, template, ec2_new.children);		
+	}
+	else {
+		ec2_query = ec2_query_dict[queryName];
+		ec2_data = ec2_query.data;
+		traverse(ec2_data, ec2_new.children);	//traverse them all at the start?
+	}
+	//add start position for d3 animation to 'float' in the data tree.
+	ec2_new.x0 = height / 2;
+	ec2_new.y0 = 0;
+	
+	var expandData = ec2_query.expand;
+	if (!expandData) {
+		ec2_new.children.forEach(collapse);	
+	}
+	return ec2_new;
+    
+}
+
+	
+	
+	function transformData(data, template, new_obj) {
+		
+		if( Object.prototype.toString.call( template ) != '[object Array]' ) {			
+			new_obj.push( {display: "new_obj passed to transformData must be an array"});
+			return;
+		}
+		if( Object.prototype.toString.call( new_obj ) != '[object Array]' ) {			
+			console.log("new_obj passed to transformData must be an array");
+			new_obj.push( {display: "new_obj passed to transformData must be an array"});
+			return;
+		}		
+		template.forEach(function(templateItem, i, array) {
+			//for each in the array
+				//Get new data cx by executing path.  for each result if we have a label - create node with that name  and process children with new  node as new cx
+				//if we have key create node using data extracted by evaluating key path
+				//for each node just created, process children passing in data  cx.
+			var jutzPath = templateItem.path;
+			if (typeof(jutzPath) == "undefined") {
+				jutzPath = ".";
+			}
+			var compiledPath = compileJutzPath(jutzPath);
+			var label = templateItem.label;
+			var key = templateItem.key;
+			var f = (function() {
+				if (typeof(label) == "undefined") {
+					if(typeof(key) == "undefined") {
+						return function(d) {return "??"}; //must have  one of label or key
+					} 
+					else {					
+						//we have a key
+						return function(d){
+							var compiledKeyPath = compileJutzPath(key);
+							//var dataIter = selectSelfAsNodeList(d);
+							var keyNode = compiledKeyPath.findOne(d);
+							keyNode = keyNode == null ? "" : keyNode;
+							//:console.log(keyNode);
+							return keyNode.toString();
+						}
+					} 
+				}
+				else {
+					if(typeof(key) != "undefined") {					
+						return function(d){
+							//we have a key and a label so concatenate
+							var compiledKeyPath = compileJutzPath(key);
+							//var dataIter = selectSelfAsNodeList(d);
+							var keyNode = compiledKeyPath.findOne(d);
+							keyNode = keyNode == null ? "" : keyNode;
+							return label + ": " + keyNode.toString();
+						}
+					}
+					else {
+						return function(d) {
+							return label;
+						}
+					}
+				}
+			})();
+			// f() now gives us the value of the display attribute.
+			
+			var cxCount = compiledPath.forEach(enumMode.MULTI, data, function(d) {
+				var new_cx = {}
+				//from this node we need to follow the template down bringing in other child data.
+				var displayText = f(d);
+				new_cx["display"] = displayText;
+				
+				new_obj.push(new_cx);  //should be making a shallow copy of d?						
+				//if the template is asking for child data from this point, process it.
+				if (templateItem.children) {
+					new_cx["children"] = [];
+					transformData(d, templateItem.children, new_cx.children);
+				}
+			});			
+			//console.log("COUNT: " + cxCount.toString());			
+			//console.log(compiledPath.getPath());
+			
+		});
+	}
+ 
+	newQuery();
+
+	d3.select(self.frameElement).style("height", "800px");
+	
+</script>
+
+</body>
+</html>
