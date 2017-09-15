@@ -19,14 +19,17 @@ function linkLayers(rootNode) {
     if (nextToDoList.length == 0) {
       let discard = toDoLists.pop();
       let child =  parents.pop();
-      let parent = parents[parents.length - 1]; //there should aleays be at least 2 items on parent list in this event.  If not this will blow up.  Could check, but better to know that this is not working.
-
-      //if this is a leaf node then create relationships for it
-      if (typeof(child.relationships) != "undefined") {
-        initialiseRels(child, tempProcessList);
-      }
-      //rollup child to parent
-      rollUp(parent, child, tempProcessList);
+      let parent = parents[parents.length - 1];
+      console.log("Hello");
+console.log(parent);
+      if (typeof(parent != "undefined")) {
+        //if this is a leaf node then create relationships for it
+        if (typeof(child.relationships) != "undefined") {
+          initialiseRels(child, tempProcessList);
+        }
+        //rollup child to parent
+        rollUp(parent, child, tempProcessList);
+      } //else we should be done now.
     }
     else {
       let nextToDo = nextToDoList.pop();

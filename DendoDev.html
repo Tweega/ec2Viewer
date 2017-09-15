@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Dendrogram</title>
+    <!--<script src="/Scripts/require.js"></script>-->
+    <script src="../Scripts/jquery-3.1.1.min.js"></script>
+    <!-- <script src="../Scripts/d3/d3.js"></script> -->
+    <script src="http://d3js.org/d3.v3.min.js"></script>
+    <script src="../Scripts/neo4j/lib/browser/neo4j-web.js"></script>
+    <script src="../Visualisations/Base.js"></script>
+    <script src="../Visualisations/Dendrogram.js"></script>
+
+    <script src="../Data/TestOrgDataWithRelationships.js"></script>
+    <script src="../Data/TestProcessData.js"></script>
+
+    <link href="../Styles/Default.css" rel="stylesheet" />
+    <link href="../Styles/fontawesome.css" rel="stylesheet" />
+
+    <style>
+.node {
+  cursor: pointer;
+}
+.nodes circle {
+  fill: #fff;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.node text {
+  font: 10px sans-serif;
+}
+.link {
+  fill: none;
+  stroke: #ccc;
+  stroke-width: 1.5px;
+}
+.leaf circle{
+	fill: #fff;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.branch circle{
+	fill: lightsteelblue;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.data-link circle{
+	fill: #green;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.jp {
+	margin-left: 100px;
+	width: 50em;
+}
+
+#dendodiv {
+  margin: 5px;
+}
+</style>
+
+
+</head>
+<body>
+  <svg version = "1.1" style="display: none">
+  <defs>
+      <!-- A circle of radius 200 -->
+      <circle id = "s1" cx = "20" cy = "20" r = "20" fill = "yellow" stroke = "black" stroke-width = "3"/>
+      <!-- An ellipse (rx=200,ry=150) -->
+      <ellipse id = "s2" cx = "200" cy = "150" rx = "200" ry = "150" fill = "salmon" stroke = "black" stroke-width = "3"/>
+
+      <path id="house"
+         d="M32 18.451l-16-12.42-16 12.42v-5.064l16-12.42 16 12.42zM28 18v12h-8v-8h-8v8h-8v-12l12-9z"/>
+
+      <path id="diamond" d="M10,0 l25,30 l-25,30 l-25,-30 l25,-30"
+         style="stroke: #000000;
+         fill: #6666ff;
+      " />
+  </defs>
+
+</svg>
+
+
+<!-- see http://bl.ocks.org/anonymous/2b1d992dfb66542ec1e2 -->
+<div id="dendodiv"></div>
+<script type="text/javascript">
+
+var dendodiv = document.getElementById("dendodiv");
+  var screenDimensions = {width: dendodiv.clientWidth - 13, height: document.documentElement.clientHeight}
+  var margin = {top: 20, right: 20, bottom: 20, left: 20},
+      width = screenDimensions.width - margin.right - margin.left,
+      height = screenDimensions.height - margin.top - margin.bottom;
+
+  var svg = d3.select("#dendodiv").append("svg")
+    .attr("width", width + margin.right + margin.left)
+    .attr("height", height + margin.top + margin.bottom)
+    .attr("style", "outline: thin solid red;")
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")")
+
+    var a = [{x: 0, y: 0}, {x: 10, y: 10}, {x: 20, y: 20}];
+
+    // a.forEach(function(i, coords) {
+    //
+    // });
+
+
+    svg.append("use")
+      .attr("xlink:href","#s1")
+      .attr("x", 0)
+      .attr("y", 0);
+
+      svg.append("use")
+        .attr("xlink:href","#house")
+        .attr("x", 0)
+        .attr("y", 50);
+
+        svg.append("use")
+          .attr("xlink:href","#diamond")
+          .attr("x", 0)
+          .attr("y", 350);
+
+splashMore(orgData, svg, screenDimensions);
+var sanity = 0;
+linkLayers(orgData);
+getPivotLevels(processData);
+
+
+
+function splashMore(data, container, screenDimensions, depth = 2){
+  var width = screenDimensions.width - margin.right - margin.left,
+      height = screenDimensions.height - margin.top - margin.bottom;
+  var childCount = data.children.length;
+  var portion = (height / childCount + 2);
+  var d = depth;
+  data.children.forEach(function (child, i){
+    let y = i * portion;
+    let x = d * 100;
+
+    svg.append("use")
+      .attr("xlink:href","#diamond")
+      .attr("x", x)
+      .attr("y", y);
+    if (typeof(child.children) != "undefined") {
+      splashMore(child, svg, screenDimensions, depth + 1);
+    }
+
+  });
+}
+
+function linkLayers(rootNode) {
+
+  var nextChildren = rootNode.children || [];
+  nextChildren = nextChildren.map(function(c, i){
+    return c;
+  });
+  var toDoLists = [nextChildren.reverse()];
+  rootNode["rels"] = {};
+  var parents = [rootNode];
+
+  //we need to do this for each process node
+  // for the moment, assume that we have the root process node, P1.
+
+  var tempProcessList = [{key: "PA", isRoot: true, processes:["P1", "P2"]}];  //this will be a list of process keys that leaf org nodes must have a relationship with to count
+  //in fact this should be a list of lists, one for each process.
+
+  lenToDoLists = toDoLists.length;
+
+  while ((lenToDoLists > 0) && (sanity < 50)) {
+    nextToDoList = toDoLists[lenToDoLists - 1];
+
+    //concole.log("AA")
+
+    if (nextToDoList.length == 0) {
+      let discard = toDoLists.pop();
+      let child =  parents.pop();
+      let parent = parents[parents.length - 1]; //there should aleays be at least 2 items on parent list in this event.  If not this will blow up.  Could check, but better to know that this is not working.
+
+      //if this is a leaf node then create relationships for it
+      if (typeof(child.relationships) != "undefined") {
+        initialiseRels(child, tempProcessList);
+      }
+
+      if (typeof(parent) != "undefined") {
+        //rollup child to parent
+        rollUp(parent, child, tempProcessList);
+      } //else we should be done now.
+
+    }
+    else {
+      let nextToDo = nextToDoList.pop();
+      nextToDo["rels"] = {};
+      parents.push(nextToDo);
+      nextChildren = nextToDo.children || [];
+      nextChildren = nextChildren.map(function(c, i){
+        return c;
+      });
+      toDoLists.push(nextChildren.reverse());
+    }
+    lenToDoLists = toDoLists.length;
+    sanity++;
+  }
+  console.log (rootNode);
+}
+
+function rollUp(parent, child, processFilterLists) {
+  //copy up relationships into parent
+
+  processFilterLists.forEach(function(processInfo, idx){
+    //child.rels is a dictionary, whose keys are the processInfo.key
+    var processKey = processInfo.key;
+    var childProcessMap = child.rels[processKey];
+    var childProcessKeys = Object.keys(childProcessMap);
+    //console.log(child.rels);
+    // var filteredRelationships = childProcessKeys.map(function(k){
+    //     var x = {};
+    //     x[k] = childProcessMap[k]
+    //   return x;
+    // }); //child should always have a rels collection
+    //console.log (filteredRelationships);
+
+    //only need to apply the filter on leaf level.  we know we ae on a leaf level if child has relationships
+    //also can skip filter if it is known that the list contains all processes (pivot nodes).
+    var filterRequired = typeof(child.relationships) != "undefined" ? !processInfo.isRoot : false;
+
+    //check if there is a rels context for this process on the parent
+
+var filteredKeys = childProcessKeys;
+    var cxRels;
+// console.log(parent);
+// console.log(child);
+    if (typeof(parent.rels[processKey]) != "undefined") {
+        cxRels = parent.rels[processKey];
+    }
+    else {
+      cxRels = {};
+      parent.rels[processKey] = cxRels;
+    }
+
+
+//console.log(cxRels);
+filterRequired = false;   //debug -- remove this line
+    //cxRels is where we are going to store the relationships for this LHS node.
+    if (filterRequired )  {
+      console.log("presume we are not getting here for the momemnt");
+      // we are at the leaf level for LHS and will not have an entry in rels for this processInfo
+      filteredRelationships = filteredRelationships.filter(function (rel){
+        true; //for the moment
+      });
+    }
+//console.log(filteredRelationships);
+    //copy child rels up to parent (cxRels).
+    filteredKeys.forEach(function(key, i){
+      console.log(key);
+      childRel = childProcessMap[key];
+      //r is a child relation to copy up to parent
+      let parentRel = cxRels[key];
+      if (typeof(parentRel) != "undefined") {
+
+let termpStarter = cxRels[key].value
+        cxRels[key].value = cxRels[key].value + childRel.value;
+      console.log("" + termpStarter + " plus " + childRel.value + " = " + cxRels[key].value )
+      }
+      else {
+        let childRel = childProcessMap[key]
+        cxRels[key] = {target: childRel.target, value: childRel.value};
+      }
+    });
+  });
+  /*at the end of this we should have on the parent node
+
+  */
+}
+
+
+function initialiseRels(leafNode, processFilterLists) {
+  //this will look a lot like rollup, possibly rationalise later.
+
+  var cx = {};
+  leafNode["rels"] = cx;
+
+  processFilterLists.forEach(function(processInfo, idx){
+    //processInfo.key has the name of the process that we are summing for
+    //processInfo.isRoot if true, no  filter required
+
+
+    //var filterRequired = typeof(child.relationships) != "undefined" ? !processInfo.isRoot : false;
+    var filterRequired = !processInfo.isRoot;
+
+    //check if there is a rels context for this process on the parent
+    var processKey = processInfo.key;
+
+    var cxRels = {};
+    cx[processKey] = cxRels;
+
+
+    var filteredRelationships = leafNode.relationships.filter(function (r) {
+      var retVal = false;
+      if (filterRequired){
+        retVal = true; //for the moment.
+      }
+      retVal = true;
+      return retVal;
+    });
+
+    filteredRelationships.reduce(function(accum, r) {
+        accum[r.target] = {target: r.target, value: parseInt(r.value)};
+        return accum;
+    }, cxRels);
+
+    //we should now have on thr leaf nodes a rels dictionary keyed on process names
+    //each of these will point to another dictionary
+    //console.log(leafNode)
+  });
+}
+
+
+function getPivotLevels(rootNode) {
+  var stack = [{depth: 1, node: rootNode}];
+  var levelProcesses = [];
+
+  while (stack.length > 0){
+      var data = stack.pop();
+      if (data.depth > levelProcesses.length) {
+        levelProcesses.push([]);
+      }
+      var levelList = levelProcesses[data.depth - 1];
+      levelList.push(data.node.name);  //using name as a key here, there might be a better alternative.
+console.log(data);
+      if ((typeof(data.node.children) != "undefined") &&  data.node.children.length > 0) {
+        //put each child onto the stack.
+        data.node.children.forEach(function(child, i) {
+          console.log ("Presumably not coming here")
+          stack.push({depth: data.depth + 1, node: child});
+        });
+      }
+  }
+  console.log(levelProcesses)
+}
+
+</script>
+
+
+</body>
+</html>
